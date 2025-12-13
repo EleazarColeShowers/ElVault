@@ -7,7 +7,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -29,23 +28,22 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import coil.compose.rememberAsyncImagePainter
-import com.example.elvault.data.enums.VaultCategory
-import com.example.elvault.data.models.VaultItem
+import com.example.elvault.data.local.entity.VaultEntity
+import com.example.elvault.data.enums.VaultMediaType
 import com.example.elvault.ui.theme.ElVaultTheme
+import com.example.elvault.ui.viewmodel.VaultViewModel
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -171,53 +169,21 @@ fun SplashScreen(onTimeout: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun VaultHomeScreen() {
+fun VaultHomeScreen(viewModel: VaultViewModel = viewModel()) {
     var searchQuery by remember { mutableStateOf("") }
-    var selectedCategory by remember { mutableStateOf<VaultCategory?>(null) }
-
+    var selectedMediaType by remember { mutableStateOf<VaultMediaType?>(null) }
     var showPreserveDialog by remember { mutableStateOf(false) }
 
-    // Sample data with poetic descriptions
-    val vaultItems = remember {
-        listOf(
-            VaultItem(
-                1,
-                "Google Account",
-                "example@gmail.com",
-                Icons.Default.Lock,
-                VaultCategory.PASSWORD
-            ),
-            VaultItem(2, "Bank Card", "•••• 4532", Icons.Default.DateRange, VaultCategory.IMAGE),
-            VaultItem(
-                3,
-                "Secure Notes",
-                "Personal thoughts",
-                Icons.Default.Edit,
-                VaultCategory.NOTE
-            ),
-            VaultItem(4, "ID Document", "National ID", Icons.Default.Face, VaultCategory.DOCUMENT),
-            VaultItem(
-                5,
-                "Facebook",
-                "user@facebook.com",
-                Icons.Default.Lock,
-                VaultCategory.PASSWORD
-            ),
-            VaultItem(
-                6,
-                "Amazon",
-                "shopping@email.com",
-                Icons.Default.Lock,
-                VaultCategory.PASSWORD
-            ),
-        )
-    }
+    val allItems by viewModel.allVaultItems.collectAsState()
+    val isLoading by viewModel.isLoading.collectAsState()
 
-    val filteredItems = vaultItems.filter { item ->
-        val matchesSearch = item.title.contains(searchQuery, ignoreCase = true) ||
-                item.subtitle.contains(searchQuery, ignoreCase = true)
-        val matchesCategory = selectedCategory == null || item.category == selectedCategory
-        matchesSearch && matchesCategory
+    val filteredItems = remember(allItems, searchQuery, selectedMediaType) {
+        allItems.filter { item ->
+            val matchesSearch = item.title?.contains(searchQuery, ignoreCase = true) == true ||
+                    item.description?.contains(searchQuery, ignoreCase = true) == true
+            val matchesType = selectedMediaType == null || item.mediaType == selectedMediaType
+            matchesSearch && matchesType
+        }
     }
 
     Scaffold(
@@ -250,9 +216,7 @@ fun VaultHomeScreen() {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = {
-                    showPreserveDialog= true
-                },
+                onClick = { showPreserveDialog = true },
                 icon = { Icon(Icons.Default.Add, "Add") },
                 text = { Text("Preserve a Memory") },
                 containerColor = MaterialTheme.colorScheme.primary
@@ -275,18 +239,17 @@ fun VaultHomeScreen() {
 
             Spacer(Modifier.height(16.dp))
 
-            CategoryFilterRow(
-                selectedCategory = selectedCategory,
-                onCategorySelected = { selectedCategory = it }
+            MediaTypeFilterRow(
+                selectedMediaType = selectedMediaType,
+                onMediaTypeSelected = { selectedMediaType = it }
             )
 
             Spacer(Modifier.height(16.dp))
 
-            StatsCard(totalItems = vaultItems.size)
+            StatsCard(totalItems = allItems.size)
 
             Spacer(Modifier.height(20.dp))
 
-            // Items List Header
             Text(
                 text = if (filteredItems.isEmpty()) "The Silence" else "Your Collection",
                 fontSize = 18.sp,
@@ -306,14 +269,24 @@ fun VaultHomeScreen() {
 
             Spacer(Modifier.height(12.dp))
 
-            if (filteredItems.isEmpty()) {
+            if (isLoading) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+            } else if (filteredItems.isEmpty()) {
                 EmptyState(searchQuery = searchQuery)
             } else {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(filteredItems) { item ->
-                        VaultItemCard(item = item)
+                        VaultEntityCard(
+                            item = item,
+                            onDelete = { viewModel.deleteVaultItem(item) }
+                        )
                     }
 
                     item {
@@ -323,13 +296,13 @@ fun VaultHomeScreen() {
             }
         }
     }
+
     if (showPreserveDialog) {
         PreserveDialog(
             onDismissRequest = { showPreserveDialog = false },
-            onConfirm = { newItem ->
-                // Handle saving the new item
+            onConfirm = { newEntity ->
+                viewModel.insertVaultItem(newEntity)
                 showPreserveDialog = false
-                // TODO: Add newItem to your vault list
             }
         )
     }
@@ -388,39 +361,33 @@ fun SearchBar(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CategoryFilterRow(
-    selectedCategory: VaultCategory?,
-    onCategorySelected: (VaultCategory?) -> Unit
+fun MediaTypeFilterRow(
+    selectedMediaType: VaultMediaType?,
+    onMediaTypeSelected: (VaultMediaType?) -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         FilterChip(
-            selected = selectedCategory == null,
-            onClick = { onCategorySelected(null) },
-            label = { Text("All Realms") },
-            leadingIcon = {
-                Icon(Icons.Default.Face, null, Modifier.size(18.dp))
-            }
+            selected = selectedMediaType == null,
+            onClick = { onMediaTypeSelected(null) },
+            label = { Text("All") },
+            leadingIcon = { Icon(Icons.Default.Face, null, Modifier.size(18.dp)) }
         )
 
         FilterChip(
-            selected = selectedCategory == VaultCategory.PASSWORD,
-            onClick = { onCategorySelected(VaultCategory.PASSWORD) },
-            label = { Text("Whispers") },
-            leadingIcon = {
-                Icon(Icons.Default.Lock, null, Modifier.size(18.dp))
-            }
+            selected = selectedMediaType == VaultMediaType.IMAGE,
+            onClick = { onMediaTypeSelected(VaultMediaType.IMAGE) },
+            label = { Text("Images") },
+            leadingIcon = { Icon(Icons.Default.Lock, null, Modifier.size(18.dp)) }
         )
 
         FilterChip(
-            selected = selectedCategory == VaultCategory.IMAGE,
-            onClick = { onCategorySelected(VaultCategory.IMAGE) },
-            label = { Text("Treasures") },
-            leadingIcon = {
-                Icon(Icons.Default.Lock, null, Modifier.size(18.dp))
-            }
+            selected = selectedMediaType == VaultMediaType.DOCUMENT,
+            onClick = { onMediaTypeSelected(VaultMediaType.DOCUMENT) },
+            label = { Text("Docs") },
+            leadingIcon = { Icon(Icons.Default.Face, null, Modifier.size(18.dp)) }
         )
     }
 }
@@ -476,7 +443,9 @@ fun StatsCard(totalItems: Int) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun VaultItemCard(item: VaultItem) {
+fun VaultEntityCard(item: VaultEntity, onDelete: () -> Unit) {
+    var showDeleteDialog by remember { mutableStateOf(false) }
+
     Card(
         onClick = { /* Open item details */ },
         modifier = Modifier.fillMaxWidth(),
@@ -492,58 +461,76 @@ fun VaultItemCard(item: VaultItem) {
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(
-                        when (item.category) {
-                            VaultCategory.PASSWORD -> MaterialTheme.colorScheme.primaryContainer
-                            VaultCategory.IMAGE -> MaterialTheme.colorScheme.secondaryContainer
-                            VaultCategory.NOTE -> MaterialTheme.colorScheme.tertiaryContainer
-                            VaultCategory.DOCUMENT -> MaterialTheme.colorScheme.errorContainer
-                        }
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = item.icon,
-                    contentDescription = null,
-                    tint = when (item.category) {
-                        VaultCategory.PASSWORD -> MaterialTheme.colorScheme.onPrimaryContainer
-                        VaultCategory.IMAGE -> MaterialTheme.colorScheme.onSecondaryContainer
-                        VaultCategory.NOTE -> MaterialTheme.colorScheme.onTertiaryContainer
-                        VaultCategory.DOCUMENT -> MaterialTheme.colorScheme.onErrorContainer
-                    },
-                    modifier = Modifier.size(24.dp)
-                )
+            // Preview based on media type
+            when (item.mediaType) {
+                VaultMediaType.IMAGE -> {
+                    Image(
+                        painter = rememberAsyncImagePainter(Uri.parse(item.uri)),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+                else -> {
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(
+                                when (item.mediaType) {
+                                    VaultMediaType.VIDEO -> MaterialTheme.colorScheme.secondaryContainer
+                                    VaultMediaType.AUDIO -> MaterialTheme.colorScheme.tertiaryContainer
+                                    VaultMediaType.DOCUMENT -> MaterialTheme.colorScheme.errorContainer
+                                    VaultMediaType.PASSWORD -> MaterialTheme.colorScheme.primaryContainer
+                                    VaultMediaType.NOTE -> MaterialTheme.colorScheme.surfaceVariant
+                                    else -> MaterialTheme.colorScheme.surfaceVariant
+                                }
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = when (item.mediaType) {
+                                VaultMediaType.VIDEO -> Icons.Default.DateRange
+                                VaultMediaType.AUDIO -> Icons.Default.Refresh
+                                VaultMediaType.DOCUMENT -> Icons.Default.Face
+                                VaultMediaType.PASSWORD -> Icons.Default.Lock
+                                VaultMediaType.NOTE -> Icons.Default.Edit
+                                else -> Icons.Default.Lock
+                            },
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
             }
 
             Spacer(Modifier.width(16.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = item.title,
+                    text = item.title ?: "Untitled",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = item.subtitle,
+                    text = item.description ?: "No description",
                     fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = item.category.poeticName,
+                    text = item.mediaType.poeticName,
                     fontSize = 11.sp,
                     fontStyle = FontStyle.Italic,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
             }
 
-            IconButton(onClick = { /* Show options */ }) {
+            IconButton(onClick = { showDeleteDialog = true }) {
                 Icon(
                     imageVector = Icons.Default.MoreVert,
                     contentDescription = "More options",
@@ -551,6 +538,27 @@ fun VaultItemCard(item: VaultItem) {
                 )
             }
         }
+    }
+
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete Memory?") },
+            text = { Text("This action cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete()
+                    showDeleteDialog = false
+                }) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
@@ -579,29 +587,15 @@ fun EmptyState(searchQuery: String) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
-
             Spacer(Modifier.height(8.dp))
-
             Text(
-                text = "waiting to guard",
+                text = "waiting to guard what you hold dear.",
                 fontSize = 17.sp,
                 fontStyle = FontStyle.Italic,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
-
-            Spacer(Modifier.height(8.dp))
-
-            Text(
-                text = "what you hold dear.",
-                fontSize = 17.sp,
-                fontStyle = FontStyle.Italic,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
-
             Spacer(Modifier.height(24.dp))
-
             Text(
                 text = "Tap below to preserve your first memory",
                 fontSize = 13.sp,
@@ -616,35 +610,6 @@ fun EmptyState(searchQuery: String) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
-
-            Spacer(Modifier.height(8.dp))
-
-            Text(
-                text = "Perhaps it's elsewhere,",
-                fontSize = 17.sp,
-                fontStyle = FontStyle.Italic,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(Modifier.height(8.dp))
-
-            Text(
-                text = "or perhaps it never was.",
-                fontSize = 17.sp,
-                fontStyle = FontStyle.Italic,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(Modifier.height(24.dp))
-
-            Text(
-                text = "Try seeking with different words",
-                fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                textAlign = TextAlign.Center
-            )
         }
     }
 }
@@ -652,45 +617,32 @@ fun EmptyState(searchQuery: String) {
 @Composable
 fun PreserveDialog(
     onDismissRequest: () -> Unit,
-    onConfirm: (VaultItem) -> Unit
+    onConfirm: (VaultEntity) -> Unit
 ) {
-    var selectedCategory by remember { mutableStateOf(VaultCategory.PASSWORD) }
+    var selectedMediaType by remember { mutableStateOf(VaultMediaType.IMAGE) }
     var title by remember { mutableStateOf("") }
-    var subtitle by remember { mutableStateOf("") }
-
-    // Category-specific fields
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var website by remember { mutableStateOf("") }
-    var passwordVisible by remember { mutableStateOf(false) }
-
-    var cardNumber by remember { mutableStateOf("") }
-    var cardHolder by remember { mutableStateOf("") }
-    var expiryDate by remember { mutableStateOf("") }
-    var cvv by remember { mutableStateOf("") }
-
-    var noteContent by remember { mutableStateOf("") }
-
-    var documentType by remember { mutableStateOf("") }
-    var documentNumber by remember { mutableStateOf("") }
-
+    var description by remember { mutableStateOf("") }
     var imageUri by remember { mutableStateOf<Uri?>(null) }
 
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        imageUri = uri
-    }
+    ) { uri -> imageUri = uri }
+
+    var videoUri by remember { mutableStateOf<Uri?>(null) }
+    val videoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = { uri ->
+            videoUri = uri
+        }
+    )
+
+
 
     AlertDialog(
         onDismissRequest = onDismissRequest,
         title = {
             Column {
-                Text(
-                    "Preserve a Memory",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp
-                )
+                Text("Preserve a Memory", fontWeight = FontWeight.Bold, fontSize = 20.sp)
                 Text(
                     "What secrets shall we keep?",
                     fontSize = 12.sp,
@@ -707,242 +659,124 @@ fun PreserveDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Category Selection
-                Text(
-                    "Type of Memory",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                Text("Type", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    CategoryChip(
-                        category = VaultCategory.PASSWORD,
-                        selectedCategory = selectedCategory,
-                        onClick = { selectedCategory = VaultCategory.PASSWORD }
-                    )
-                    CategoryChip(
-                        category = VaultCategory.IMAGE,
-                        selectedCategory = selectedCategory,
-                        onClick = { selectedCategory = VaultCategory.IMAGE }
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    VaultMediaType.entries.take(3).forEach { type ->
+                        FilterChip(
+                            selected = selectedMediaType == type,
+                            onClick = { selectedMediaType = type },
+                            label = { Text(type.name) }
+                        )
+                    }
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    CategoryChip(
-                        category = VaultCategory.NOTE,
-                        selectedCategory = selectedCategory,
-                        onClick = { selectedCategory = VaultCategory.NOTE }
-                    )
-                    CategoryChip(
-                        category = VaultCategory.DOCUMENT,
-                        selectedCategory = selectedCategory,
-                        onClick = { selectedCategory = VaultCategory.DOCUMENT }
-                    )
+                if (selectedMediaType == VaultMediaType.IMAGE) {
+                    if (imageUri == null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { imagePickerLauncher.launch("image/*") },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    Icons.Default.Person,
+                                    null,
+                                    Modifier.size(48.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text("Tap to choose", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    else {
+                        Image(
+                            painter = rememberAsyncImagePainter(imageUri),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { imagePickerLauncher.launch("image/*") },
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                }
+                else if (selectedMediaType== VaultMediaType.VIDEO){
+                        if (videoUri == null) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(180.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable { imagePickerLauncher.launch("video/*") },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        Icons.Default.Person,
+                                        null,
+                                        Modifier.size(48.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text("Tap to choose", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                        else {
+                            Image(
+                                painter = rememberAsyncImagePainter(videoUri),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(180.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { imagePickerLauncher.launch("video/*") },
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+
+
                 }
 
-                Divider(modifier = Modifier.padding(vertical = 8.dp))
-
-                // Common Fields
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
                     label = { Text("Title") },
-                    placeholder = { Text("Give it a name...") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
 
-                // Category-specific fields
-                when (selectedCategory) {
-                    VaultCategory.PASSWORD -> {
-                        OutlinedTextField(
-                            value = username,
-                            onValueChange = { username = it },
-                            label = { Text("Username/Email") },
-                            placeholder = { Text("user@example.com") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            leadingIcon = { Icon(Icons.Default.Person, null) }
-                        )
-
-                        OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("Password") },
-                            placeholder = { Text("Your secret key...") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            visualTransformation = if (passwordVisible)
-                                VisualTransformation.None
-                            else
-                                PasswordVisualTransformation(),
-                            leadingIcon = { Icon(Icons.Default.Lock, null) },
-                            trailingIcon = {
-                                IconButton(onClick = { passwordVisible = !passwordVisible }) {
-                                    Icon(
-                                        if (passwordVisible) Icons.Default.Face
-                                        else Icons.Default.Person,
-                                        "Toggle password visibility"
-                                    )
-                                }
-                            }
-                        )
-
-                        OutlinedTextField(
-                            value = website,
-                            onValueChange = { website = it },
-                            label = { Text("Website (Optional)") },
-                            placeholder = { Text("https://example.com") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            leadingIcon = { Icon(Icons.Default.Lock, null) }
-                        )
-                    }
-
-                    VaultCategory.IMAGE -> {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Text(
-                                "Select an Image",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp
-                            )
-
-                            if (imageUri == null) {
-                                // Empty state — pick image
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(180.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                                        .clickable { imagePickerLauncher.launch("image/*") },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Icon(
-                                            imageVector = Icons.Default.Person,
-                                            contentDescription = "Pick Image",
-                                            modifier = Modifier.size(48.dp),
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Text(
-                                            "Tap to choose from gallery",
-                                            fontSize = 12.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            } else {
-                                // Image preview
-                                Image(
-                                    painter = rememberAsyncImagePainter(imageUri),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(180.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .clickable { imagePickerLauncher.launch("image/*") },
-                                    contentScale = ContentScale.Crop
-                                )
-                            }
-
-                            OutlinedTextField(
-                                value = subtitle,
-                                onValueChange = { subtitle = it },
-                                label = { Text("Description (Optional)") },
-                                placeholder = { Text("Describe this image…") },
-                                modifier = Modifier.fillMaxWidth(),
-                                maxLines = 2
-                            )
-                        }
-                    }
-
-
-                    VaultCategory.NOTE -> {
-                        OutlinedTextField(
-                            value = noteContent,
-                            onValueChange = { noteContent = it },
-                            label = { Text("Note Content") },
-                            placeholder = { Text("Write your thoughts here...") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(150.dp),
-                            maxLines = 6,
-                            leadingIcon = { Icon(Icons.Default.Edit, null) }
-                        )
-                    }
-
-                    VaultCategory.DOCUMENT -> {
-                        OutlinedTextField(
-                            value = documentType,
-                            onValueChange = { documentType = it },
-                            label = { Text("Document Type") },
-                            placeholder = { Text("Passport, ID, License...") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            leadingIcon = { Icon(Icons.Default.Lock, null) }
-                        )
-
-                        OutlinedTextField(
-                            value = documentNumber,
-                            onValueChange = { documentNumber = it },
-                            label = { Text("Document Number") },
-                            placeholder = { Text("A12345678") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            leadingIcon = { Icon(Icons.Default.Lock, null) }
-                        )
-                    }
-                }
-
                 OutlinedTextField(
-                    value = subtitle,
-                    onValueChange = { subtitle = it },
-                    label = { Text("Notes (Optional)") },
-                    placeholder = { Text("Additional details...") },
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("Description") },
                     modifier = Modifier.fillMaxWidth(),
-                    maxLines = 2,
-                    leadingIcon = { Icon(Icons.Default.Lock, null) }
+                    maxLines = 3
                 )
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    val icon = when (selectedCategory) {
-                        VaultCategory.PASSWORD -> Icons.Default.Lock
-                        VaultCategory.IMAGE -> Icons.Default.Lock
-                        VaultCategory.NOTE -> Icons.Default.Edit
-                        VaultCategory.DOCUMENT -> Icons.Default.Face
+                    val uri = imageUri?.toString() ?: ""
+                    if (uri.isNotEmpty() && title.isNotEmpty()) {
+                        onConfirm(
+                            VaultEntity(
+                                uri = uri,
+                                mediaType = selectedMediaType,
+                                title = title,
+                                description = description.ifEmpty { null }
+                            )
+                        )
                     }
-
-                    val displaySubtitle = when (selectedCategory) {
-                        VaultCategory.PASSWORD -> username.ifEmpty { subtitle }
-                        VaultCategory.IMAGE -> "•••• ${cardNumber.takeLast(4)}"
-                        VaultCategory.NOTE -> noteContent.take(30) + "..."
-                        VaultCategory.DOCUMENT -> documentNumber.ifEmpty { subtitle }
-                    }
-
-                    val newItem = VaultItem(
-                        id = System.currentTimeMillis().toInt(),
-                        title = title,
-                        subtitle = displaySubtitle,
-                        icon = icon,
-                        category = selectedCategory
-                    )
-                    onConfirm(newItem)
                 },
-                enabled = title.isNotEmpty()
+                enabled = title.isNotEmpty() && imageUri != null
             ) {
                 Text("Preserve")
             }
@@ -951,43 +785,6 @@ fun PreserveDialog(
             TextButton(onClick = onDismissRequest) {
                 Text("Cancel")
             }
-        }
-    )
-}
-
-@Composable
-fun CategoryChip(
-    category: VaultCategory,
-    selectedCategory: VaultCategory,
-    onClick: () -> Unit
-) {
-    val isSelected = category == selectedCategory
-
-    FilterChip(
-        selected = isSelected,
-        onClick = onClick,
-        label = {
-            Text(
-                text = when (category) {
-                    VaultCategory.PASSWORD -> "Password"
-                    VaultCategory.IMAGE -> "Image"
-                    VaultCategory.NOTE -> "Note"
-                    VaultCategory.DOCUMENT -> "Document"
-                },
-                fontSize = 13.sp
-            )
-        },
-        leadingIcon = {
-            Icon(
-                imageVector = when (category) {
-                    VaultCategory.PASSWORD -> Icons.Default.Lock
-                    VaultCategory.IMAGE -> Icons.Default.Lock
-                    VaultCategory.NOTE -> Icons.Default.Edit
-                    VaultCategory.DOCUMENT -> Icons.Default.Face
-                },
-                contentDescription = null,
-                modifier = Modifier.size(16.dp)
-            )
         }
     )
 }
