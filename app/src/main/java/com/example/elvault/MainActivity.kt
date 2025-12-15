@@ -1,5 +1,9 @@
 package com.example.elvault
 
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -28,7 +32,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -44,7 +50,9 @@ import com.example.elvault.data.local.entity.VaultEntity
 import com.example.elvault.data.enums.VaultMediaType
 import com.example.elvault.ui.theme.ElVaultTheme
 import com.example.elvault.ui.viewmodel.VaultViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,6 +85,22 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+}
+
+// Helper function to extract video thumbnail
+suspend fun getVideoThumbnail(context: Context, uri: Uri): Bitmap? {
+    return withContext(Dispatchers.IO) {
+        try {
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(context, uri)
+            val bitmap = retriever.getFrameAtTime(0)
+            retriever.release()
+            bitmap
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
         }
     }
 }
@@ -177,6 +201,15 @@ fun VaultHomeScreen(viewModel: VaultViewModel = viewModel()) {
     val allItems by viewModel.allVaultItems.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
 
+    // Permission launcher
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions.values.all { it }) {
+            showPreserveDialog = true
+        }
+    }
+
     val filteredItems = remember(allItems, searchQuery, selectedMediaType) {
         allItems.filter { item ->
             val matchesSearch = item.title?.contains(searchQuery, ignoreCase = true) == true ||
@@ -216,7 +249,20 @@ fun VaultHomeScreen(viewModel: VaultViewModel = viewModel()) {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { showPreserveDialog = true },
+                onClick = {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        permissionLauncher.launch(
+                            arrayOf(
+                                android.Manifest.permission.READ_MEDIA_IMAGES,
+                                android.Manifest.permission.READ_MEDIA_VIDEO
+                            )
+                        )
+                    } else {
+                        permissionLauncher.launch(
+                            arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                        )
+                    }
+                },
                 icon = { Icon(Icons.Default.Add, "Add") },
                 text = { Text("Preserve a Memory") },
                 containerColor = MaterialTheme.colorScheme.primary
@@ -384,10 +430,10 @@ fun MediaTypeFilterRow(
         )
 
         FilterChip(
-            selected = selectedMediaType == VaultMediaType.DOCUMENT,
-            onClick = { onMediaTypeSelected(VaultMediaType.DOCUMENT) },
-            label = { Text("Docs") },
-            leadingIcon = { Icon(Icons.Default.Face, null, Modifier.size(18.dp)) }
+            selected = selectedMediaType == VaultMediaType.VIDEO,
+            onClick = { onMediaTypeSelected(VaultMediaType.VIDEO) },
+            label = { Text("Videos") },
+            leadingIcon = { Icon(Icons.Default.PlayArrow, null, Modifier.size(18.dp)) }
         )
     }
 }
@@ -445,9 +491,23 @@ fun StatsCard(totalItems: Int) {
 @Composable
 fun VaultEntityCard(item: VaultEntity, onDelete: () -> Unit) {
     var showDeleteDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var videoThumbnail by remember { mutableStateOf<Bitmap?>(null) }
+
+    // Load video thumbnail if it's a video
+    LaunchedEffect(item.uri, item.mediaType) {
+        if (item.mediaType == VaultMediaType.VIDEO) {
+            try {
+                val uri = Uri.parse(item.uri)
+                videoThumbnail = getVideoThumbnail(context, uri)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
 
     Card(
-        onClick = { /* Open item details */ },
+        onClick = { },
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
@@ -464,14 +524,53 @@ fun VaultEntityCard(item: VaultEntity, onDelete: () -> Unit) {
             // Preview based on media type
             when (item.mediaType) {
                 VaultMediaType.IMAGE -> {
-                    Image(
-                        painter = rememberAsyncImagePainter(Uri.parse(item.uri)),
-                        contentDescription = null,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape),
-                        contentScale = ContentScale.Crop
-                    )
+                    Box {
+                        Image(
+                            painter = rememberAsyncImagePainter(Uri.parse(item.uri)),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                }
+                VaultMediaType.VIDEO -> {
+                    Box {
+                        if (videoThumbnail != null) {
+                            Image(
+                                bitmap = videoThumbnail!!.asImageBitmap(),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape),
+                                contentScale = ContentScale.Crop
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.secondaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            }
+                        }
+                        // Play icon overlay
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = "Video",
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(
+                                    Color.Black.copy(alpha = 0.3f),
+                                    CircleShape
+                                )
+                                .padding(12.dp),
+                            tint = Color.White
+                        )
+                    }
                 }
                 else -> {
                     Box(
@@ -480,7 +579,6 @@ fun VaultEntityCard(item: VaultEntity, onDelete: () -> Unit) {
                             .clip(CircleShape)
                             .background(
                                 when (item.mediaType) {
-                                    VaultMediaType.VIDEO -> MaterialTheme.colorScheme.secondaryContainer
                                     VaultMediaType.AUDIO -> MaterialTheme.colorScheme.tertiaryContainer
                                     VaultMediaType.DOCUMENT -> MaterialTheme.colorScheme.errorContainer
                                     VaultMediaType.PASSWORD -> MaterialTheme.colorScheme.primaryContainer
@@ -492,7 +590,6 @@ fun VaultEntityCard(item: VaultEntity, onDelete: () -> Unit) {
                     ) {
                         Icon(
                             imageVector = when (item.mediaType) {
-                                VaultMediaType.VIDEO -> Icons.Default.DateRange
                                 VaultMediaType.AUDIO -> Icons.Default.Refresh
                                 VaultMediaType.DOCUMENT -> Icons.Default.Face
                                 VaultMediaType.PASSWORD -> Icons.Default.Lock
@@ -623,20 +720,71 @@ fun PreserveDialog(
     var title by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var imageUri by remember { mutableStateOf<Uri?>(null) }
+    var videoUri by remember { mutableStateOf<Uri?>(null) }
+    var videoThumbnail by remember { mutableStateOf<Bitmap?>(null) }
+    var audioUri by remember { mutableStateOf<Uri?>(null) }
+
+    val context = LocalContext.current
 
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
-    ) { uri -> imageUri = uri }
-
-    var videoUri by remember { mutableStateOf<Uri?>(null) }
-    val videoPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent(),
-        onResult = { uri ->
-            videoUri = uri
+    ) { uri ->
+        uri?.let {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            imageUri = it
         }
-    )
+    }
 
+    val videoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            videoUri = it
+        }
+    }
 
+    val audioPicker= rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ){uri ->
+        uri?.let{
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+
+                )
+            }catch (e:Exception){
+                e.printStackTrace()
+            }
+            audioUri = it
+        }
+
+    }
+
+    LaunchedEffect(videoUri) {
+        videoUri?.let { uri ->
+            try {
+                videoThumbnail = getVideoThumbnail(context, uri)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismissRequest,
@@ -689,11 +837,10 @@ fun PreserveDialog(
                                     Modifier.size(48.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                Text("Tap to choose", fontSize = 12.sp)
+                                Text("Tap to choose image", fontSize = 12.sp)
                             }
                         }
-                    }
-                    else {
+                    } else {
                         Image(
                             painter = rememberAsyncImagePainter(imageUri),
                             contentDescription = null,
@@ -705,43 +852,48 @@ fun PreserveDialog(
                             contentScale = ContentScale.Crop
                         )
                     }
-                }
-                else if (selectedMediaType== VaultMediaType.VIDEO){
+                } else if (selectedMediaType == VaultMediaType.VIDEO) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { videoPicker.launch("video/*") },
+                        contentAlignment = Alignment.Center
+                    ) {
                         if (videoUri == null) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(180.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .clickable { imagePickerLauncher.launch("video/*") },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Icon(
-                                        Icons.Default.Person,
-                                        null,
-                                        Modifier.size(48.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Text("Tap to choose", fontSize = 12.sp)
-                                }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    null,
+                                    Modifier.size(48.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text("Tap to choose video", fontSize = 12.sp)
                             }
-                        }
-                        else {
-                            Image(
-                                painter = rememberAsyncImagePainter(videoUri),
-                                contentDescription = null,
+                        } else {
+                            if (videoThumbnail != null) {
+                                Image(
+                                    bitmap = videoThumbnail!!.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                            } else {
+                                CircularProgressIndicator()
+                            }
+                            Icon(
+                                Icons.Default.PlayArrow,
+                                contentDescription = "Video",
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(180.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable { imagePickerLauncher.launch("video/*") },
-                                contentScale = ContentScale.Crop
+                                    .size(64.dp)
+                                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                    .padding(12.dp),
+                                tint = Color.White
                             )
                         }
-
-
+                    }
                 }
 
                 OutlinedTextField(
@@ -764,7 +916,12 @@ fun PreserveDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    val uri = imageUri?.toString() ?: ""
+                    val uri = when (selectedMediaType) {
+                        VaultMediaType.IMAGE -> imageUri?.toString()
+                        VaultMediaType.VIDEO -> videoUri?.toString()
+                        else -> null
+                    } ?: ""
+
                     if (uri.isNotEmpty() && title.isNotEmpty()) {
                         onConfirm(
                             VaultEntity(
@@ -776,7 +933,9 @@ fun PreserveDialog(
                         )
                     }
                 },
-                enabled = title.isNotEmpty() && imageUri != null
+                enabled = title.isNotEmpty() &&
+                        ((selectedMediaType == VaultMediaType.IMAGE && imageUri != null) ||
+                                (selectedMediaType == VaultMediaType.VIDEO && videoUri != null))
             ) {
                 Text("Preserve")
             }
